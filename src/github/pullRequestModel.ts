@@ -72,11 +72,11 @@ import { IssueModel } from './issueModel';
 import {
 	convertRESTPullRequestToRawPullRequest,
 	convertRESTReviewEvent,
-	getAvatarWithEnterpriseFallback,
 	getReactionGroup,
 	insertNewCommitsSinceReview,
 	parseGraphQLComment,
 	parseGraphQLReaction,
+	parseGraphQLReviewers,
 	parseGraphQLReviewEvent,
 	parseGraphQLReviewThread,
 	parseGraphQLTimelineEvents,
@@ -111,7 +111,7 @@ export type FileViewedState = { [key: string]: ViewedState };
 const BATCH_SIZE = 100;
 
 export class PullRequestModel extends IssueModel<PullRequest> implements IPullRequestModel {
-	static ID = 'PullRequestModel';
+	static override ID = 'PullRequestModel';
 
 	public isDraft?: boolean;
 	public localBranchName?: string;
@@ -192,10 +192,6 @@ export class PullRequestModel extends IssueModel<PullRequest> implements IPullRe
 		return this._reviewThreadsCacheInitialized;
 	}
 
-	public get isMerged(): boolean {
-		return this.state === GithubItemStateEnum.Merged;
-	}
-
 	public get hasPendingReview(): boolean {
 		return this._hasPendingReview;
 	}
@@ -237,7 +233,7 @@ export class PullRequestModel extends IssueModel<PullRequest> implements IPullRe
 	public isRemoteBaseDeleted?: boolean;
 	public base: GitHubRef;
 
-	protected updateState(state: string) {
+	protected override updateState(state: string) {
 		if (state.toLowerCase() === 'open') {
 			this.state = GithubItemStateEnum.Open;
 		} else if (state.toLowerCase() === 'merged' || this.item.merged) {
@@ -247,7 +243,7 @@ export class PullRequestModel extends IssueModel<PullRequest> implements IPullRe
 		}
 	}
 
-	update(item: PullRequest): void {
+	override update(item: PullRequest): void {
 		super.update(item);
 		this.isDraft = item.isDraft;
 		this.suggestedReviewers = item.suggestedReviewers;
@@ -975,30 +971,7 @@ export class PullRequestModel extends IssueModel<PullRequest> implements IPullRe
 			return [];
 		}
 
-		const reviewers: (IAccount | ITeam)[] = [];
-		for (const reviewer of data.repository.pullRequest.reviewRequests.nodes) {
-			if (reviewer.requestedReviewer?.login) {
-				const account: IAccount = {
-					login: reviewer.requestedReviewer.login,
-					url: reviewer.requestedReviewer.url,
-					avatarUrl: getAvatarWithEnterpriseFallback(reviewer.requestedReviewer.avatarUrl, undefined, remote.isEnterprise),
-					email: reviewer.requestedReviewer.email,
-					name: reviewer.requestedReviewer.name,
-					id: reviewer.requestedReviewer.id
-				};
-				reviewers.push(account);
-			} else if (reviewer.requestedReviewer) {
-				const team: ITeam = {
-					name: reviewer.requestedReviewer.name,
-					url: reviewer.requestedReviewer.url,
-					avatarUrl: getAvatarWithEnterpriseFallback(reviewer.requestedReviewer.avatarUrl, undefined, remote.isEnterprise),
-					id: reviewer.requestedReviewer.id!,
-					org: remote.owner,
-					slug: reviewer.requestedReviewer.slug!
-				};
-				reviewers.push(team);
-			}
-		}
+		const reviewers: (IAccount | ITeam)[] = parseGraphQLReviewers(data, remote);
 		Logger.debug('Get Review Requests - done', PullRequestModel.ID);
 		return reviewers;
 	}
@@ -1015,7 +988,7 @@ export class PullRequestModel extends IssueModel<PullRequest> implements IPullRe
 				input: {
 					pullRequestId: this.graphNodeId,
 					teamIds: teamReviewers,
-					userIds: reviewers
+					userIds: reviewers.filter(r => !r.startsWith('BOT')),
 				},
 			},
 		});
@@ -1930,7 +1903,7 @@ export class PullRequestModel extends IssueModel<PullRequest> implements IPullRe
 				this.markFilesInProgressRefCount.delete(f);
 				completed.push(f);
 			} else {
-				this.markFilesInProgressRefCount.set(f, count - 1);
+				this.markFilesInProgressRefCount.set(f, count);
 			}
 		}
 		return completed;

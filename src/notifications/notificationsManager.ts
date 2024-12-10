@@ -4,103 +4,229 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as vscode from 'vscode';
-import { dispose } from '../common/utils';
-import { Notification } from '../github/interface';
+import { Disposable } from '../common/lifecycle';
+import { toNotificationUri } from '../common/uri';
+import { NotificationSubjectType } from '../github/interface';
 import { IssueModel } from '../github/issueModel';
-import { INotificationItem } from './notificationItem';
+import { PullRequestModel } from '../github/pullRequestModel';
+import { isNotificationTreeItem, NotificationTreeDataItem, NotificationTreeItem } from './notificationItem';
+import { NotificationsProvider } from './notificationsProvider';
 
-export class NotificationItem implements INotificationItem {
-	private _priority: string | undefined;
-	private _priorityReasoning: string | undefined;
-
-	get priority() {
-		return this._priority;
-	}
-	set priority(value: string | undefined) {
-		if (this._priority !== value) {
-			this._priority = value;
-		}
-	}
-
-	get priorityReasoning() {
-		return this._priorityReasoning;
-	}
-	set priorityReasoning(value: string | undefined) {
-		if (this._priorityReasoning !== value) {
-			this._priorityReasoning = value;
-		}
-	}
-
-	getPriority(): { priority: string; priorityReasoning: string; } | undefined {
-		if (this._priority && this._priorityReasoning) {
-			return { priority: this._priority, priorityReasoning: this._priorityReasoning };
-		}
-	}
-
-	constructor(
-		public readonly notification: Notification,
-		readonly model: IssueModel
-	) { }
+export interface INotificationTreeItems {
+	readonly notifications: NotificationTreeItem[];
+	readonly hasNextPage: boolean
 }
 
-export interface NotificationUpdate {
-	key: string;
-	priority: string | undefined;
-	priorityReasoning: string | undefined;
+export enum NotificationsSortMethod {
+	Timestamp = 'Timestamp',
+	Priority = 'Priority'
 }
 
-export class NotificationsManager {
-	private readonly _onDidChangeNotifications = new vscode.EventEmitter<INotificationItem[]>();
+export class NotificationsManager extends Disposable implements vscode.TreeDataProvider<NotificationTreeDataItem> {
+	private _onDidChangeTreeData: vscode.EventEmitter<NotificationTreeDataItem | undefined | void> = this._register(new vscode.EventEmitter<NotificationTreeDataItem | undefined | void>());
+	readonly onDidChangeTreeData: vscode.Event<NotificationTreeDataItem | undefined | void> = this._onDidChangeTreeData.event;
+
+	private readonly _onDidChangeNotifications = this._register(new vscode.EventEmitter<NotificationTreeItem[]>());
 	readonly onDidChangeNotifications = this._onDidChangeNotifications.event;
-	private readonly _disposable: vscode.Disposable[] = [];
 
-	private readonly _notifications = new Map<string, NotificationItem>();
+	private _pageCount: number = 1;
+	private _hasNextPage: boolean = false;
+	private _dateTime: Date = new Date();
+	private _fetchNotifications: boolean = false;
+	private _notifications = new Map<string, NotificationTreeItem>();
 
-	constructor() {
-		this._disposable.push(this._onDidChangeNotifications);
+	private _sortingMethod: NotificationsSortMethod = NotificationsSortMethod.Timestamp;
+	get sortingMethod(): NotificationsSortMethod { return this._sortingMethod; }
+
+	constructor(private readonly _notificationProvider: NotificationsProvider) {
+		super();
+		this._register(this._onDidChangeTreeData);
+		this._register(this._onDidChangeNotifications);
 	}
 
-	dispose() {
-		dispose(this._disposable);
-	}
+	//#region TreeDataProvider
 
-	public clear() {
-		if (this._notifications.size === 0) {
-			return;
+	async getChildren(element?: unknown): Promise<NotificationTreeDataItem[] | undefined> {
+		if (element !== undefined) {
+			return undefined;
 		}
-		const updates = Array.from(this._notifications.values());
-		this._notifications.clear();
-		this._onDidChangeNotifications.fire(updates);
+
+		const notificationsData = await this.getNotifications();
+		if (notificationsData === undefined) {
+			return undefined;
+		}
+
+		if (notificationsData.hasNextPage) {
+			return [...notificationsData.notifications, { kind: 'loadMoreNotifications' }];
+		}
+
+		return notificationsData.notifications;
 	}
 
-	public getNotification(key: string): INotificationItem | undefined {
+	async getTreeItem(element: NotificationTreeDataItem): Promise<vscode.TreeItem> {
+		if (isNotificationTreeItem(element)) {
+			return this._resolveNotificationTreeItem(element);
+		}
+		return this._resolveLoadMoreNotificationsTreeItem();
+	}
+
+	private _resolveNotificationTreeItem(element: NotificationTreeItem): vscode.TreeItem {
+		const label = element.notification.subject.title;
+		const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.None);
+		const notification = element.notification;
+		const model = element.model;
+
+		if (notification.subject.type === NotificationSubjectType.Issue && model instanceof IssueModel) {
+			item.iconPath = element.model.isOpen
+				? new vscode.ThemeIcon('issues', new vscode.ThemeColor('issues.open'))
+				: new vscode.ThemeIcon('issue-closed', new vscode.ThemeColor('issues.closed'));
+		}
+		if (notification.subject.type === NotificationSubjectType.PullRequest && model instanceof PullRequestModel) {
+			item.iconPath = model.isOpen
+				? new vscode.ThemeIcon('git-pull-request', new vscode.ThemeColor('pullRequests.open'))
+				: new vscode.ThemeIcon('git-pull-request', new vscode.ThemeColor('pullRequests.merged'));
+		}
+		item.description = `${notification.owner}/${notification.name}`;
+		item.contextValue = notification.subject.type;
+		item.resourceUri = toNotificationUri({ key: element.notification.key });
+		item.command = {
+			command: 'notification.chatSummarizeNotification',
+			title: 'Summarize Notification',
+			arguments: [element]
+		};
+		return item;
+	}
+
+	private _resolveLoadMoreNotificationsTreeItem(): vscode.TreeItem {
+		const item = new vscode.TreeItem(vscode.l10n.t('Load More Notifications...'), vscode.TreeItemCollapsibleState.None);
+		item.command = {
+			title: 'Load More Notifications',
+			command: 'notifications.loadMore'
+		};
+		item.contextValue = 'loadMoreNotifications';
+		return item;
+	}
+
+	//#endregion
+
+	public async getNotifications(): Promise<INotificationTreeItems | undefined> {
+		if (this._fetchNotifications) {
+			// Get raw notifications
+			const notificationsData = await this._notificationProvider.getNotifications(this._dateTime.toISOString(), this._pageCount);
+			if (!notificationsData) {
+				return undefined;
+			}
+
+			// Resolve notifications
+			const notificationTreeItems = new Map<string, NotificationTreeItem>();
+			await Promise.all(notificationsData.notifications.map(async notification => {
+				const model = await this._notificationProvider.getNotificationModel(notification);
+				if (!model) {
+					return;
+				}
+
+				notificationTreeItems.set(notification.key, {
+					notification, model, kind: 'notification'
+				});
+			}));
+
+			for (const [key, value] of notificationTreeItems.entries()) {
+				this._notifications.set(key, value);
+			}
+			this._hasNextPage = notificationsData.hasNextPage;
+
+			this._fetchNotifications = false;
+		}
+
+		// Calculate notification priority
+		if (this._sortingMethod === NotificationsSortMethod.Priority) {
+			const notificationsWithoutPriority = Array.from(this._notifications.values())
+				.filter(notification => notification.priority === undefined);
+
+			const notificationPriorities = await this._notificationProvider
+				.getNotificationsPriority(notificationsWithoutPriority);
+
+			for (const { key, priority, priorityReasoning } of notificationPriorities) {
+				const notification = this._notifications.get(key);
+				if (!notification) {
+					continue;
+				}
+
+				notification.priority = priority;
+				notification.priorityReason = priorityReasoning;
+
+				this._notifications.set(key, notification);
+			}
+		}
+
+		const notifications = Array.from(this._notifications.values());
+		this._onDidChangeNotifications.fire(notifications);
+
+		return {
+			notifications: this._sortNotifications(notifications),
+			hasNextPage: this._hasNextPage
+		};
+	}
+
+	public getNotification(key: string): NotificationTreeItem | undefined {
 		return this._notifications.get(key);
 	}
 
-	public removeNotification(key: string): void {
-		this._notifications.delete(key);
-	}
-
-	public setNotification(key: string, notification: NotificationItem) {
-		this._notifications.set(key, notification);
-		this._onDidChangeNotifications.fire([notification]);
-	}
-
-	public getAllNotifications(): INotificationItem[] {
+	public getAllNotifications(): NotificationTreeItem[] {
 		return Array.from(this._notifications.values());
 	}
 
-	public updateNotificationPriority(updates: NotificationUpdate[]) {
-		const updated: INotificationItem[] = [];
-		for (const update of updates) {
-
-			const notification = this._notifications.get(update.key);
-			if (notification) {
-				notification.priority = update.priority;
-				notification.priorityReasoning = update.priorityReasoning;
-				updated.push(notification);
-			}
+	public refresh(): void {
+		if (this._notifications.size !== 0) {
+			const updates = Array.from(this._notifications.values());
+			this._onDidChangeNotifications.fire(updates);
 		}
-		this._onDidChangeNotifications.fire(updated);
+
+		this._pageCount = 1;
+		this._dateTime = new Date();
+		this._notifications.clear();
+
+		this._refresh(true);
+	}
+
+	public loadMore(): void {
+		this._pageCount++;
+		this._refresh(true);
+	}
+
+	public _refresh(fetch: boolean): void {
+		this._fetchNotifications = fetch;
+		this._onDidChangeTreeData.fire();
+	}
+
+	public async markAsRead(notificationIdentifier: { threadId: string, notificationKey: string }): Promise<void> {
+		const notification = this._notifications.get(notificationIdentifier.notificationKey);
+		if (notification) {
+			await this._notificationProvider.markAsRead(notificationIdentifier);
+
+			this._onDidChangeNotifications.fire([notification]);
+			this._notifications.delete(notificationIdentifier.notificationKey);
+
+			this._refresh(false);
+		}
+	}
+
+	public sortNotifications(method: NotificationsSortMethod): void {
+		if (this._sortingMethod === method) {
+			return;
+		}
+
+		this._sortingMethod = method;
+		this._refresh(false);
+	}
+
+	private _sortNotifications(notifications: NotificationTreeItem[]): NotificationTreeItem[] {
+		if (this._sortingMethod === NotificationsSortMethod.Timestamp) {
+			return notifications.sort((n1, n2) => n2.notification.updatedAd.getTime() - n1.notification.updatedAd.getTime());
+		} else if (this._sortingMethod === NotificationsSortMethod.Priority) {
+			return notifications.sort((n1, n2) => Number(n2.priority) - Number(n1.priority));
+		}
+
+		return notifications;
 	}
 }

@@ -27,16 +27,15 @@
 		"contribShareMenu",
 		"diffCommand",
 		"fileComments",
-		"lmTools",
 		"quickDiffProvider",
 		"shareProvider",
 		"tokenInformation",
 		"treeViewMarkdownMessage"
 	],
-	"version": "0.98.0",
+	"version": "0.100.1",
 	"publisher": "GitHub",
 	"engines": {
-		"vscode": "^1.95.0"
+		"vscode": "^1.96.0"
 	},
 	"categories": [
 		"Other",
@@ -67,7 +66,7 @@
 			{
 				"id": "githubpr",
 				"name": "githubpr",
-				"fullName": "GitHub",
+				"fullName": "GitHub Pull Requests",
 				"description": "Chat participant for GitHub Pull Requests extension",
 				"when": "config.githubPullRequests.experimental.chat"
 			}
@@ -462,6 +461,21 @@
 					"default": "auto",
 					"markdownDescription": "%githubPullRequests.createDefaultBaseBranch.description%"
 				},
+				"githubPullRequests.experimental.chat": {
+					"type": "boolean",
+					"markdownDescription": "%githubPullRequests.experimental.chat.description%",
+					"default": false
+				},
+				"githubPullRequests.experimental.notificationsView": {
+					"type": "boolean",
+					"markdownDescription": "%githubPullRequests.experimental.notificationsView.description%",
+					"default": false
+				},
+				"githubPullRequests.experimental.useQuickChat": {
+					"type": "boolean",
+					"markdownDescription": "%githubPullRequests.experimental.useQuickChat.description%",
+					"default": false
+				},
 				"githubIssues.ignoreMilestones": {
 					"type": "array",
 					"default": [],
@@ -646,6 +660,11 @@
 					"type": "boolean",
 					"default": false,
 					"description": "%githubPullRequests.showPullRequestNumberInTree.description%"
+				},
+				"githubIssues.alwaysPromptForNewIssueRepo": {
+					"type": "boolean",
+					"default": false,
+					"description": "%githubIssues.alwaysPromptForNewIssueRepo.description%"
 				}
 			}
 		},
@@ -1177,6 +1196,11 @@
 				"category": "%command.pull.request.category%"
 			},
 			{
+				"command": "pr.closeRelatedEditors",
+				"title": "%command.pr.closeRelatedEditors.title%",
+				"category": "%command.pull.request.category%"
+			},
+			{
 				"command": "review.diffWithPrHead",
 				"title": "%command.review.diffWithPrHead.title%",
 				"category": "%command.pull.request.category%"
@@ -1521,7 +1545,7 @@
 				"command": "notification.markAsRead",
 				"title": "%command.notifications.markAsRead.title%",
 				"category": "%command.notifications.category%",
-				"icon": "$(check)"
+				"icon": "$(mail-read)"
 			}
 		],
 		"viewsWelcome": [
@@ -1761,6 +1785,10 @@
 				{
 					"command": "pr.showDiffAll",
 					"when": "false"
+				},
+				{
+					"command": "pr.closeRelatedEditors",
+					"when": "gitHubOpenRepositoryCount != 0"
 				},
 				{
 					"command": "review.suggestDiff",
@@ -2330,12 +2358,12 @@
 				{
 					"command": "notification.chatSummarizeNotification",
 					"group": "inline@1",
-					"when": "view == notifications:github && (viewItem == 'Issue' || viewItem == 'PullRequest') && config.githubPullRequests.experimental.notificationsView"
+					"when": "view == notifications:github && (viewItem == 'Issue' || viewItem == 'PullRequest') && config.githubPullRequests.experimental.notificationsView && config.githubPullRequests.experimental.chat"
 				},
 				{
 					"command": "notification.chatSummarizeNotification",
 					"group": "issues_0@0",
-					"when": "view == notifications:github && (viewItem == 'Issue' || viewItem == 'PullRequest') && config.githubPullRequests.experimental.notificationsView"
+					"when": "view == notifications:github && (viewItem == 'Issue' || viewItem == 'PullRequest') && config.githubPullRequests.experimental.notificationsView && config.githubPullRequests.experimental.chat"
 				},
 				{
 					"command": "notification.openOnGitHub",
@@ -2381,6 +2409,11 @@
 					"command": "pr.refreshPullRequest",
 					"when": "view == pr:github && viewItem =~ /pullrequest|description/",
 					"group": "pullrequest@1"
+				},
+				{
+					"command": "issue.chatSummarizeIssue",
+					"when": "view == pr:github && viewItem =~ /pullrequest/ && github.copilot-chat.activated && config.githubPullRequests.experimental.chat",
+					"group": "pullrequest@2"
 				},
 				{
 					"command": "pr.openPullRequestOnGitHub",
@@ -2447,18 +2480,18 @@
 				},
 				{
 					"command": "issue.openIssue",
-					"when": "view == issues:github && viewItem =~ /^(link)?(current|continue)?issue/ && !github.copilot-chat.activated",
-					"group": "inline@2"
+					"when": "view == issues:github && viewItem =~ /^(link)?(current|continue)?issue/",
+					"group": "inline@1"
 				},
 				{
 					"command": "issue.chatSummarizeIssue",
-					"when": "view == issues:github && viewItem =~ /^(link)?(current|continue)?issue/ && github.copilot-chat.activated",
+					"when": "view == issues:github && viewItem =~ /^(link)?(current|continue)?issue/ && github.copilot-chat.activated && config.githubPullRequests.experimental.chat",
 					"group": "inline@0"
 				},
 				{
-					"command": "issue.chatSuggestFix",
-					"when": "view == issues:github && viewItem =~ /^(link)?(current|continue)?issue/ && github.copilot-chat.activated",
-					"group": "inline@1"
+					"command": "issue.chatSummarizeIssue",
+					"when": "view == pr:github && viewItem =~ /pullrequest/ && github.copilot-chat.activated && config.githubPullRequests.experimental.chat",
+					"group": "inline@0"
 				},
 				{
 					"command": "issue.openIssue",
@@ -2523,12 +2556,12 @@
 				},
 				{
 					"command": "issue.chatSummarizeIssue",
-					"when": "view == issues:github && viewItem =~ /^(link)?(current|continue)?issue/ && github.copilot-chat.activated",
+					"when": "view == issues:github && viewItem =~ /^(link)?(current|continue)?issue/ && github.copilot-chat.activated && config.githubPullRequests.experimental.chat",
 					"group": "issues_1@0"
 				},
 				{
 					"command": "issue.chatSuggestFix",
-					"when": "view == issues:github && viewItem =~ /^(link)?(current|continue)?issue/ && github.copilot-chat.activated",
+					"when": "view == issues:github && viewItem =~ /^(link)?(current|continue)?issue/ && github.copilot-chat.activated && config.githubPullRequests.experimental.chat",
 					"group": "issues_1@1"
 				},
 				{
@@ -2884,6 +2917,13 @@
 					"group": "1_cutcopypaste@0"
 				}
 			],
+			"editor/title/context": [
+				{
+					"command": "pr.closeRelatedEditors",
+					"when": "resourceScheme == 'pr' || resourceScheme == 'review' || resourcePath in github:unviewedFiles || resourcePath in github:viewedFiles",
+					"group": "1_close@60"
+				}
+			],
 			"editor/title/context/share": [
 				{
 					"command": "issue.copyGithubPermalinkWithoutRange",
@@ -3113,18 +3153,18 @@
 		],
 		"languageModelTools": [
 			{
-				"name": "github-pull-request_fetch",
+				"name": "github-pull-request_issue_fetch",
 				"tags": [
 					"github",
 					"issues",
 					"prs"
 				],
-				"toolReferenceName": "fetch",
-				"displayName": "%languageModelTools.github-pull-request_fetch.displayName%",
-				"modelDescription": "Get a GitHub issue/PR, which includes the title, body, and comments.",
+				"toolReferenceName": "issue_fetch",
+				"displayName": "%languageModelTools.github-pull-request_issue_fetch.displayName%",
+				"modelDescription": "Get a GitHub issue/PR's details as a JSON object.",
 				"icon": "$(info)",
 				"canBeReferencedInPrompt": true,
-				"parametersSchema": {
+				"inputSchema": {
 					"type": "object",
 					"properties": {
 						"repo": {
@@ -3154,25 +3194,46 @@
 						"issueNumber"
 					]
 				},
-				"supportedContentTypes": [
-					"text/plain",
-					"text/json"
-				],
 				"when": "config.githubPullRequests.experimental.chat"
 			},
 			{
-				"name": "github-pull-request_summarize",
+				"name": "github-pull-request_notification_fetch",
+				"tags": [
+					"github",
+					"notification"
+				],
+				"toolReferenceName": "notification_fetch",
+				"displayName": "%languageModelTools.github-pull-request_notification_fetch.displayName%",
+				"modelDescription": "Get a GitHub notification's details as a JSON object.",
+				"icon": "$(info)",
+				"canBeReferencedInPrompt": true,
+				"inputSchema": {
+					"type": "object",
+					"properties": {
+						"thread_id": {
+							"type": "string",
+							"description": "The notification thread id."
+						}
+					},
+					"required": [
+						"thread_id"
+					]
+				},
+				"when": "config.githubPullRequests.experimental.chat"
+			},
+			{
+				"name": "github-pull-request_issue_summarize",
 				"tags": [
 					"github",
 					"issues",
 					"prs"
 				],
-				"toolReferenceName": "summarize",
-				"displayName": "%languageModelTools.github-pull-request_summarize.displayName%",
-				"modelDescription": "Returns a summary of a GitHub issue or PR given issue/PR details.",
+				"toolReferenceName": "issue_summarize",
+				"displayName": "%languageModelTools.github-pull-request_issue_summarize.displayName%",
+				"modelDescription": "Summarizes a GitHub issue or pull request. A summary is a great way to describe an issue or pull request.",
 				"icon": "$(info)",
 				"canBeReferencedInPrompt": true,
-				"parametersSchema": {
+				"inputSchema": {
 					"type": "object",
 					"properties": {
 						"title": {
@@ -3183,10 +3244,28 @@
 							"type": "string",
 							"description": "The body of the issue/PR"
 						},
+						"owner": {
+							"type": "string",
+							"description": "The owner of the repo in which the issue/PR is located"
+						},
+						"repo": {
+							"type": "string",
+							"description": "The repo in which the issue/PR is located"
+						},
 						"comments": {
 							"type": "array",
 							"items": {
-								"type": "string"
+								"type": "object",
+								"properties": {
+									"body": {
+										"type": "string",
+										"description": "The comment body"
+									},
+									"author": {
+										"type": "string",
+										"description": "The author of the comment"
+									}
+								}
 							},
 							"description": "The array of associated string comments"
 						},
@@ -3211,13 +3290,123 @@
 					"required": [
 						"title",
 						"body",
-						"comments"
+						"comments",
+						"owner",
+						"repo"
 					]
 				},
-				"supportedContentTypes": [
-					"text/plain",
-					"text/json"
+				"when": "config.githubPullRequests.experimental.chat"
+			},
+			{
+				"name": "github-pull-request_notification_summarize",
+				"tags": [
+					"github",
+					"notification"
 				],
+				"toolReferenceName": "notification_summarize",
+				"displayName": "%languageModelTools.github-pull-request_notification_summarize.displayName%",
+				"modelDescription": "Summarizes a GitHub notification. A summary is a great way to describe a notification.",
+				"icon": "$(info)",
+				"canBeReferencedInPrompt": true,
+				"inputSchema": {
+					"type": "object",
+					"properties": {
+						"lastReadAt": {
+							"type": "string",
+							"description": "The last read time of the notification."
+						},
+						"lastUpdatedAt": {
+							"type": "string",
+							"description": "The last updated time of the notification."
+						},
+						"unread": {
+							"type": "boolean",
+							"description": "Whether the notification is unread."
+						},
+						"title": {
+							"type": "string",
+							"description": "The title of the notification issue/PR"
+						},
+						"body": {
+							"type": "string",
+							"description": "The body of the notification issue/PR"
+						},
+						"owner": {
+							"type": "string",
+							"description": "The owner of the repo in which the issue/PR is located"
+						},
+						"repo": {
+							"type": "string",
+							"description": "The repo in which the issue/PR is located"
+						},
+						"comments": {
+							"type": "array",
+							"items": {
+								"type": "object",
+								"properties": {
+									"body": {
+										"type": "string",
+										"description": "The comment body"
+									},
+									"author": {
+										"type": "string",
+										"description": "The author of the comment"
+									}
+								}
+							},
+							"description": "The array of unread comments under the issue/PR of the notification"
+						},
+						"threadId": {
+							"type": "number",
+							"description": "The thread id of the notification"
+						},
+						"notificationKey": {
+							"type": "string",
+							"description": "The key of the notification"
+						},
+						"itemNumber": {
+							"type": "string",
+							"description": "The number of the issue/PR in the notification"
+						},
+						"itemType": {
+							"type": "string",
+							"description": "The type of the item in the notification - whether it is an issue or a PR"
+						},
+						"fileChanges": {
+							"type": "array",
+							"items": {
+								"type": "object",
+								"properties": {
+									"fileName": {
+										"type": "string",
+										"description": "The name of the file of the change"
+									},
+									"patch": {
+										"type": "string",
+										"description": "The patch of the change"
+									}
+								},
+								"required": [
+									"fileName",
+									"patch"
+								]
+							},
+							"description": "For a notification about a PR, the array of associated file changes"
+						}
+					},
+					"required": [
+						"title",
+						"comments",
+						"lastUpdatedAt",
+						"unread",
+						"threadId",
+						"notificationKey",
+						"owner",
+						"repo",
+						"itemNumber",
+						"itemType"
+					]
+				},
 				"when": "config.githubPullRequests.experimental.chat"
 			},
 			{
@@ -3231,7 +3420,7 @@
 				"modelDescription": "Summarize and suggest a fix for a GitHub issue.",
 				"icon": "$(info)",
 				"canBeReferencedInPrompt": true,
-				"parametersSchema": {
+				"inputSchema": {
 					"type": "object",
 					"properties": {
 						"repo": {
@@ -3262,9 +3451,6 @@
 						"repo"
 					]
 				},
-				"supportedContentTypes": [
-					"text/plain"
-				],
 				"when": "config.githubPullRequests.experimental.chat"
 			},
 			{
@@ -3281,7 +3467,7 @@
 				"modelDescription": "Converts natural language to a GitHub search query. Should ALWAYS be called before doing a search.",
 				"icon": "$(search)",
 				"canBeReferencedInPrompt": true,
-				"parametersSchema": {
+				"inputSchema": {
 					"type": "object",
 					"properties": {
 						"repo": {
@@ -3311,10 +3497,6 @@
 						"naturalLanguageString"
 					]
 				},
-				"supportedContentTypes": [
-					"text/plain",
-					"text/display"
-				],
 				"when": "config.githubPullRequests.experimental.chat"
 			},
 			{
@@ -3329,7 +3511,7 @@
 				"modelDescription": "Execute a GitHub search given a well formed GitHub search query. Call github-pull-request_formSearchQuery first to get good search syntax and pass the exact result in as the 'query'.",
 				"icon": "$(search)",
 				"canBeReferencedInPrompt": true,
-				"parametersSchema": {
+				"inputSchema": {
 					"type": "object",
 					"properties": {
 						"repo": {
@@ -3356,13 +3538,10 @@
 						}
 					},
 					"required": [
-						"query"
+						"query",
+						"repo"
 					]
 				},
-				"supportedContentTypes": [
-					"text/plain",
-					"text/json"
-				],
 				"when": "config.githubPullRequests.experimental.chat"
 			},
 			{
@@ -3375,55 +3554,121 @@
 				],
 				"toolReferenceName": "renderIssues",
 				"displayName": "%languageModelTools.github-pull-request_renderIssues.displayName%",
-				"modelDescription": "Render issue items from an issue search in a markdown table.",
+				"modelDescription": "Render issue items from an issue search in a markdown table. The markdown table will be displayed directly to the user by the tool. No further display should be done after this!",
 				"icon": "$(paintcan)",
 				"canBeReferencedInPrompt": false,
-				"parametersSchema": {
+				"inputSchema": {
 					"type": "object",
 					"properties": {
 						"arrayOfIssues": {
-							"oneOf": [
-								{
-									"type": "array",
-									"description": "An array of GitHub Issues.",
-									"items": {
+							"type": "array",
+							"description": "An array of GitHub Issues.",
+							"items": {
+								"type": "object",
+								"properties": {
+									"title": {
+										"type": "string",
+										"description": "The title of the issue."
+									},
+									"number": {
+										"type": "number",
+										"description": "The number of the issue."
+									},
+									"url": {
+										"type": "string",
+										"description": "The URL of the issue."
+									},
+									"state": {
+										"type": "string",
+										"description": "The state of the issue (open/closed)."
+									},
+									"createdAt": {
+										"type": "string",
+										"description": "The creation date of the issue."
+									},
+									"updatedAt": {
+										"type": "string",
+										"description": "The last update date of the issue."
+									},
+									"closedAt": {
+										"type": "string",
+										"description": "The closing date of the issue."
+									},
+									"author": {
 										"type": "object",
+										"description": "The author of the issue.",
 										"properties": {
-											"title": {
+											"login": {
 												"type": "string",
-												"description": "The title of the issue."
-											},
-											"number": {
-												"type": "number",
-												"description": "The number of the issue."
-											},
-											"body": {
-												"type": "string",
-												"description": "The body of the issue."
+												"description": "The login of the author."
 											},
 											"url": {
 												"type": "string",
-												"description": "The URL of the issue."
+												"description": "The URL of the author's profile."
 											}
 										}
+									},
+									"labels": {
+										"type": "array",
+										"description": "The labels associated with the issue.",
+										"items": {
+											"type": "object",
+											"properties": {
+												"name": {
+													"type": "string",
+													"description": "The name of the label."
+												},
+												"color": {
+													"type": "string",
+													"description": "The color of the label."
+												}
+											}
+										}
+									},
+									"assignees": {
+										"type": "array",
+										"description": "The assignees of the issue.",
+										"items": {
+											"type": "object",
+											"properties": {
+												"login": {
+													"type": "string",
+													"description": "The login of the assignee."
+												},
+												"url": {
+													"type": "string",
+													"description": "The URL of the assignee's profile."
+												}
+											}
+										}
+									},
+									"commentsCount": {
+										"type": "number",
+										"description": "The number of comments on the issue."
 									}
-								},
-								{
-									"type": "string",
-									"description": "A Json stringified array of GitHub Issues."
 								}
-							],
-							"description": "An array or stringified array of GitHub Issues."
+							},
+							"required": [
+								"title",
+								"number",
+								"url",
+								"state",
+								"createdAt",
+								"author",
+								"commentCount",
+								"reactionCount"
+							]
+						},
+						"totalIssues": {
+							"type": "number",
+							"description": "The total number of issues in the search."
 						}
 					},
 					"required": [
-						"issues"
+						"arrayOfIssues",
+						"totalIssues"
 					]
 				},
-				"supportedContentTypes": [
-					"text/plain",
-					"text/markdown"
-				],
 				"when": "config.githubPullRequests.experimental.chat"
 			}
 		]
@@ -3476,7 +3721,7 @@
 		"constants-browserify": "^1.0.0",
 		"crypto-browserify": "3.12.0",
 		"css-loader": "5.1.3",
-		"esbuild-loader": "2.10.0",
+		"esbuild-loader": "4.2.2",
 		"eslint": "7.22.0",
 		"eslint-cli": "1.1.1",
 		"eslint-plugin-import": "2.22.1",
@@ -3522,7 +3767,7 @@
 		"@octokit/rest": "18.2.1",
 		"@octokit/types": "6.10.1",
 		"@vscode/extension-telemetry": "0.7.5",
-		"@vscode/prompt-tsx": "^0.2.11-alpha",
+		"@vscode/prompt-tsx": "^0.3.0-alpha.12",
 		"apollo-boost": "^0.4.9",
 		"apollo-link-context": "1.0.20",
 		"cockatiel": "^3.1.1",
@@ -3536,6 +3781,7 @@
 		"react": "^16.12.0",
 		"react-dom": "^16.12.0",
 		"ssh-config": "4.1.1",
+		"stream-http": "^3.2.0",
 		"tunnel": "0.0.6",
 		"url-search-params-polyfill": "^8.1.1",
 		"uuid": "8.3.2",

@@ -4,21 +4,27 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as vscode from 'vscode';
+import { AuthenticationError, AuthProvider } from '../../common/authentication';
+import { CredentialStore, GitHub } from '../../github/credentials';
 import { FolderRepositoryManager } from '../../github/folderRepositoryManager';
 import { RepositoriesManager } from '../../github/repositoriesManager';
+import { hasEnterpriseUri } from '../../github/utils';
 import { ChatParticipantState } from '../participants';
 
 export interface IToolCall {
-	tool: vscode.LanguageModelToolDescription;
+	tool: vscode.LanguageModelToolInformation;
 	call: vscode.LanguageModelToolCallPart;
 	result: Thenable<vscode.LanguageModelToolResult>;
 }
 
+export const TOOL_MARKDOWN_RESULT = 'TOOL_MARKDOWN_RESULT';
+export const TOOL_COMMAND_RESULT = 'TOOL_COMMAND_RESULT';
+
 export interface IssueToolParameters {
-	issueNumber: number;
-	repo: {
-		owner: string;
-		name: string;
+	issueNumber?: number;
+	repo?: {
+		owner?: string;
+		name?: string;
 	};
 }
 
@@ -43,42 +49,55 @@ export async function concatAsyncIterable(asyncIterable: AsyncIterable<string>):
 	return result;
 }
 
-export const enum MimeTypes {
-	textPlain = 'text/plain',
-	textMarkdown = 'text/markdown',
-	textJson = 'text/json',
-	textDisplay = 'text/display' // our own made up mime type for stuff that should be shown in chat to the user
-}
-
-interface RepoToolBaseParameters {
-	repo?: {
-		owner?: string;
-		name?: string;
-	};
-}
-
-export abstract class RepoToolBase<T extends RepoToolBaseParameters> extends ToolBase<T> {
-	constructor(private readonly repositoriesManager: RepositoriesManager, chatParticipantState: ChatParticipantState) {
+export abstract class RepoToolBase<T> extends ToolBase<T> {
+	constructor(private readonly credentialStore: CredentialStore, private readonly repositoriesManager: RepositoriesManager, chatParticipantState: ChatParticipantState) {
 		super(chatParticipantState);
 	}
 
-	protected getRepoInfo(options: { parameters: T }): { owner: string; name: string; folderManager: FolderRepositoryManager } {
+	protected async getRepoInfo(options: { owner?: string, name?: string }): Promise<{ owner: string; name: string; folderManager: FolderRepositoryManager }> {
+		if (!this.credentialStore.isAnyAuthenticated()) {
+			throw new AuthenticationError();
+		}
+
 		let owner: string | undefined;
 		let name: string | undefined;
 		let folderManager: FolderRepositoryManager | undefined;
 		// The llm likes to make up an owner and name if it isn't provided one, and they tend to include 'owner' and 'name' respectively
-		if (options.parameters.repo && options.parameters.repo.owner && options.parameters.repo.name && !options.parameters.repo.owner.includes('owner') && !options.parameters.repo.name.includes('name')) {
-			owner = options.parameters.repo.owner;
-			name = options.parameters.repo.name;
-			folderManager = this.repositoriesManager.getManagerForRepository(options.parameters.repo.owner, options.parameters.repo.name);
-		} else if (this.repositoriesManager.folderManagers.length > 0) {
-			folderManager = this.repositoriesManager.folderManagers[0];
-			owner = folderManager.gitHubRepositories[0].remote.owner;
-			name = folderManager.gitHubRepositories[0].remote.repositoryName;
+		if (options.owner && options.name && !options.owner.includes('owner') && !options.name.includes('name')) {
+			owner = options.owner;
+			name = options.name;
+			folderManager = this.repositoriesManager.getManagerForRepository(options.owner, options.name);
 		}
+
+		if (!folderManager && this.repositoriesManager.folderManagers.length > 0) {
+			folderManager = this.repositoriesManager.folderManagers[0];
+			if (owner && name) {
+				await folderManager.createGitHubRepositoryFromOwnerName(owner, name);
+			} else {
+				const defaults = await folderManager.getPullRequestDefaults();
+				if (defaults) {
+					owner = defaults.owner;
+					name = defaults.repo;
+				} else {
+					owner = folderManager.gitHubRepositories[0].remote.owner;
+					name = folderManager.gitHubRepositories[0].remote.repositoryName;
+				}
+			}
+		}
+
 		if (!folderManager || !owner || !name) {
-			throw new Error(`No folder manager found for ${owner}/${name}. Make sure to have the repository open.`);
+			throw new Error(`No repository found for ${owner}/${name}. Make sure to have the repository open.`);
 		}
 		return { owner, name, folderManager };
+	}
+
+	protected getGitHub(): GitHub | undefined {
+		let authProvider: AuthProvider | undefined;
+		if (this.credentialStore.isAuthenticated(AuthProvider.githubEnterprise) && hasEnterpriseUri()) {
+			authProvider = AuthProvider.githubEnterprise;
+		} else if (this.credentialStore.isAuthenticated(AuthProvider.github)) {
+			authProvider = AuthProvider.github;
+		}
+		return (authProvider !== undefined) ? this.credentialStore.getHub(authProvider) : undefined;
 	}
 }

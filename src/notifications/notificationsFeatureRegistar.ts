@@ -4,42 +4,43 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as vscode from 'vscode';
-import { commands } from '../common/executeCommands';
+import { Disposable } from '../common/lifecycle';
 import { ITelemetry } from '../common/telemetry';
-import { dispose } from '../common/utils';
+import { onceEvent } from '../common/utils';
 import { CredentialStore } from '../github/credentials';
 import { RepositoriesManager } from '../github/repositoriesManager';
+import { chatCommand } from '../lm/utils';
 import { NotificationsDecorationProvider } from './notificationDecorationProvider';
-import { NotificationItem, NotificationsManager } from './notificationsManager';
+import { isNotificationTreeItem, NotificationTreeDataItem } from './notificationItem';
+import { NotificationsManager, NotificationsSortMethod } from './notificationsManager';
 import { NotificationsProvider } from './notificationsProvider';
-import { NotificationsTreeData } from './notificationsView';
 
-export class NotificationsFeatureRegister implements vscode.Disposable {
+export class NotificationsFeatureRegister extends Disposable {
 
-	private readonly _disposables: vscode.Disposable[] = [];
 
 	constructor(
-		credentialStore: CredentialStore,
+		readonly credentialStore: CredentialStore,
 		private readonly _repositoriesManager: RepositoriesManager,
 		private readonly _telemetry: ITelemetry
 	) {
-		const notificationsManager = new NotificationsManager();
-		this._disposables.push(notificationsManager);
-		const notificationsProvider = new NotificationsProvider(credentialStore, this._repositoriesManager, notificationsManager);
+		super();
+		const notificationsProvider = new NotificationsProvider(credentialStore, this._repositoriesManager);
+		this._register(notificationsProvider);
+
+		const notificationsManager = new NotificationsManager(notificationsProvider);
+		this._register(notificationsManager);
 
 		// Decorations
-		this._disposables.push(vscode.window.registerFileDecorationProvider(new NotificationsDecorationProvider(notificationsManager)));
+		const decorationsProvider = new NotificationsDecorationProvider(notificationsManager);
+		this._register(vscode.window.registerFileDecorationProvider(decorationsProvider));
 
 		// View
-		const dataProvider = new NotificationsTreeData(notificationsProvider, notificationsManager);
-		this._disposables.push(dataProvider);
-		const view = vscode.window.createTreeView<any>('notifications:github', {
-			treeDataProvider: dataProvider
-		});
-		this._disposables.push(view);
+		this._register(vscode.window.createTreeView<any>('notifications:github', {
+			treeDataProvider: notificationsManager
+		}));
 
 		// Commands
-		this._disposables.push(
+		this._register(
 			vscode.commands.registerCommand(
 				'notifications.sortByTimestamp',
 				async () => {
@@ -47,12 +48,12 @@ export class NotificationsFeatureRegister implements vscode.Disposable {
 						"notifications.sortByTimestamp" : {}
 					*/
 					this._telemetry.sendTelemetryEvent('notifications.sortByTimestamp');
-					return dataProvider.sortByTimestamp();
+					notificationsManager.sortNotifications(NotificationsSortMethod.Timestamp);
 				},
 				this,
 			),
 		);
-		this._disposables.push(
+		this._register(
 			vscode.commands.registerCommand(
 				'notifications.sortByPriority',
 				async () => {
@@ -60,12 +61,12 @@ export class NotificationsFeatureRegister implements vscode.Disposable {
 						"notifications.sortByTimestamp" : {}
 					*/
 					this._telemetry.sendTelemetryEvent('notifications.sortByTimestamp');
-					return dataProvider.sortByPriority();
+					notificationsManager.sortNotifications(NotificationsSortMethod.Priority);
 				},
 				this,
 			),
 		);
-		this._disposables.push(
+		this._register(
 			vscode.commands.registerCommand(
 				'notifications.refresh',
 				() => {
@@ -73,54 +74,56 @@ export class NotificationsFeatureRegister implements vscode.Disposable {
 						"notifications.refresh" : {}
 					*/
 					this._telemetry.sendTelemetryEvent('notifications.refresh');
-					notificationsProvider.clearCache();
-					return dataProvider.computeAndRefresh();
+					notificationsManager.refresh();
 				},
 				this,
 			),
 		);
-		this._disposables.push(
+		this._register(
 			vscode.commands.registerCommand('notifications.loadMore', () => {
 				/* __GDPR__
 					"notifications.loadMore" : {}
 				*/
 				this._telemetry.sendTelemetryEvent('notifications.loadMore');
-				dataProvider.loadMore();
+				notificationsManager.loadMore();
 			})
 		);
-		this._disposables.push(
-			vscode.commands.registerCommand('notification.chatSummarizeNotification', (notification: any) => {
-				if (!(notification instanceof NotificationItem)) {
+		this._register(
+			vscode.commands.registerCommand('notification.chatSummarizeNotification', (notification: NotificationTreeDataItem) => {
+				if (!isNotificationTreeItem(notification)) {
 					return;
 				}
 				/* __GDPR__
 					"notification.chatSummarizeNotification" : {}
 				*/
 				this._telemetry.sendTelemetryEvent('notification.chatSummarizeNotification');
-				vscode.commands.executeCommand(commands.OPEN_CHAT, vscode.l10n.t('@githubpr Summarize notification {0}/{1}#{2}', notification.model.remote.owner, notification.model.remote.repositoryName, notification.model.number));
+				vscode.commands.executeCommand(chatCommand(), vscode.l10n.t('@githubpr Summarize notification with thread ID #{0}', notification.notification.id));
 			})
 		);
-		this._disposables.push(
-			vscode.commands.registerCommand('notification.markAsRead', async (notification: any) => {
-				if (!(notification instanceof NotificationItem)) {
-					return;
+		this._register(
+			vscode.commands.registerCommand('notification.markAsRead', (options: any) => {
+				let threadId: string;
+				let notificationKey: string;
+				if (isNotificationTreeItem(options)) {
+					threadId = options.notification.id;
+					notificationKey = options.notification.key;
+				} else if ('threadId' in options && 'notificationKey' in options && typeof options.threadId === 'number' && typeof options.notificationKey === 'string') {
+					threadId = options.threadId;
+					notificationKey = options.notificationKey;
+				} else {
+					throw new Error(`Invalid arguments for command notification.markAsRead : ${JSON.stringify(options)}`);
 				}
 				/* __GDPR__
 					"notification.markAsRead" : {}
 				*/
 				this._telemetry.sendTelemetryEvent('notification.markAsRead');
-				return dataProvider.markAsRead(notification);
+				notificationsManager.markAsRead({ threadId, notificationKey });
 			})
 		);
 
 		// Events
-		this._repositoriesManager.onDidLoadAnyRepositories(() => {
-			notificationsProvider.clearCache();
-			dataProvider.computeAndRefresh();
-		});
-	}
-
-	dispose() {
-		dispose(this._disposables);
+		this._register(onceEvent(this._repositoriesManager.onDidLoadAnyRepositories)(() => {
+			notificationsManager.refresh();
+		}));
 	}
 }

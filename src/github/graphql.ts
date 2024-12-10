@@ -55,6 +55,7 @@ export interface AbbreviatedIssueComment {
 	reactions: {
 		totalCount: number;
 	};
+	createdAt: string;
 }
 
 export interface IssueComment extends AbbreviatedIssueComment {
@@ -113,6 +114,7 @@ export interface ReviewComment {
 		avatarUrl: string;
 		url: string;
 		id: string;
+		name?: string;
 	};
 	path: string;
 	originalPosition: number;

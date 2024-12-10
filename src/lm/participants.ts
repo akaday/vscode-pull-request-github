@@ -4,38 +4,36 @@
  *--------------------------------------------------------------------------------------------*/
 
 'use strict';
+import { renderPrompt } from '@vscode/prompt-tsx';
 import * as vscode from 'vscode';
-import { dispose } from '../common/utils';
-import { IToolCall } from './tools/toolsUtils';
-
-const llmInstructions = `Instructions:
-- The user will ask a question related to GitHub, and it may require lots of research to answer correctly. There is a selection of tools that let you perform actions or retrieve helpful context to answer the user's question.
-- If you aren't sure which tool is relevant, you can call multiple tools. You can call tools repeatedly to take actions or gather as much context as needed until you have completed the task fully. Don't give up unless you are sure the request cannot be fulfilled with the tools you have.
-- Don't ask the user for confirmation to use tools, just use them.
-- When talking about issues, be as concise as possible while still conveying all the information you need to. Avoid mentioning the following:
-  - The fact that there are no comments.
-  - Any info that seems like template info.`;
+import { Disposable } from '../common/lifecycle';
+import { ParticipantsPrompt } from './participantsPrompt';
+import { IToolCall, TOOL_COMMAND_RESULT, TOOL_MARKDOWN_RESULT } from './tools/toolsUtils';
 
 export class ChatParticipantState {
 	private _messages: vscode.LanguageModelChatMessage[] = [];
 
-	get lastToolResult(): (string | vscode.LanguageModelToolResultPart | vscode.LanguageModelToolCallPart)[] {
+	get lastToolResult(): (vscode.LanguageModelTextPart | vscode.LanguageModelToolResultPart | vscode.LanguageModelToolCallPart)[] {
 		for (let i = this._messages.length - 1; i >= 0; i--) {
 			const message = this._messages[i];
-			for (const part of message.content2) {
+			for (const part of message.content) {
 				if (part instanceof vscode.LanguageModelToolResultPart) {
-					return message.content2;
+					return message.content;
 				}
 			}
 		}
 		return [];
 	}
 
-	get firstUserMessage(): string | undefined {
+	get firstUserMessage(): vscode.LanguageModelTextPart | undefined {
 		for (let i = 0; i < this._messages.length; i++) {
 			const message = this._messages[i];
 			if (message.role === vscode.LanguageModelChatMessageRole.User && message.content) {
-				return message.content;
+				for (const part of message.content) {
+					if (part instanceof vscode.LanguageModelTextPart) {
+						return part;
+					}
+				}
 			}
 		}
 	}
@@ -48,27 +46,26 @@ export class ChatParticipantState {
 		this._messages.push(message);
 	}
 
+	addMessages(messages: vscode.LanguageModelChatMessage[]): void {
+		this._messages.push(...messages);
+	}
+
 	reset(): void {
 		this._messages = [];
 	}
 }
 
-export class ChatParticipant implements vscode.Disposable {
-	private readonly disposables: vscode.Disposable[] = [];
+export class ChatParticipant extends Disposable {
 
 	constructor(context: vscode.ExtensionContext, private readonly state: ChatParticipantState) {
-		const ghprChatParticipant = vscode.chat.createChatParticipant('githubpr', (
+		super();
+		const ghprChatParticipant = this._register(vscode.chat.createChatParticipant('githubpr', (
 			request: vscode.ChatRequest,
 			context: vscode.ChatContext,
 			stream: vscode.ChatResponseStream,
 			token: vscode.CancellationToken
-		) => this.handleParticipantRequest(request, context, stream, token));
+		) => this.handleParticipantRequest(request, context, stream, token)));
 		ghprChatParticipant.iconPath = vscode.Uri.joinPath(context.extensionUri, 'resources/icons/github_logo.png');
-		this.disposables.push(ghprChatParticipant);
-	}
-
-	dispose() {
-		dispose(this.disposables);
 	}
 
 	async handleParticipantRequest(
@@ -88,25 +85,32 @@ export class ChatParticipant implements vscode.Disposable {
 			return {
 				name: tool.name,
 				description: tool.description,
-				parametersSchema: tool.parametersSchema ?? {}
+				inputSchema: tool.inputSchema ?? {}
 			};
 		});
 
-		this.state.addMessage(vscode.LanguageModelChatMessage.Assistant(llmInstructions));
-		this.state.addMessage(vscode.LanguageModelChatMessage.User(request.prompt));
+		const { messages } = await renderPrompt(
+			ParticipantsPrompt,
+			{ userMessage: request.prompt },
+			{ modelMaxPromptTokens: model.maxInputTokens },
+			model);
+
+		this.state.addMessages(messages);
+
 		const toolReferences = [...request.toolReferences];
 		const options: vscode.LanguageModelChatRequestOptions = {
 			justification: 'Answering user questions pertaining to GitHub.'
 		};
 
+		const commands: vscode.Command[] = [];
 		const runWithFunctions = async (): Promise<void> => {
 
 			const requestedTool = toolReferences.shift();
 			if (requestedTool) {
-				options.toolChoice = requestedTool.id;
-				options.tools = allTools.filter(tool => tool.name === requestedTool.id);
+				options.toolMode = vscode.LanguageModelChatToolMode.Required;
+				options.tools = allTools.filter(tool => tool.name === requestedTool.name);
 			} else {
-				options.toolChoice = undefined;
+				options.toolMode = undefined;
 				options.tools = allTools;
 			}
 
@@ -124,14 +128,14 @@ export class ChatParticipant implements vscode.Disposable {
 						throw new Error('Got invalid tool choice: ' + part.name);
 					}
 
-					let parameters: any;
+					let input: any;
 					try {
-						parameters = part.parameters;
+						input = part.input;
 					} catch (err) {
-						throw new Error(`Got invalid tool use parameters: "${JSON.stringify(part.parameters)}". (${(err as Error).message})`);
+						throw new Error(`Got invalid tool use parameters: "${JSON.stringify(part.input)}". (${(err as Error).message})`);
 					}
 
-					const invocationOptions = { parameters, toolInvocationToken: request.toolInvocationToken, requestedContentTypes: ['text/plain', 'text/markdown', 'text/json', 'text/display'] };
+					const invocationOptions: vscode.LanguageModelToolInvocationOptions<any> = { input, toolInvocationToken: request.toolInvocationToken };
 					toolCalls.push({
 						call: part,
 						result: vscode.lm.invokeTool(tool.name, invocationOptions, token),
@@ -142,51 +146,61 @@ export class ChatParticipant implements vscode.Disposable {
 
 			if (toolCalls.length) {
 				const assistantMsg = vscode.LanguageModelChatMessage.Assistant('');
-				assistantMsg.content2 = toolCalls.map(toolCall => new vscode.LanguageModelToolCallPart(toolCall.tool.name, toolCall.call.toolCallId, toolCall.call.parameters));
+				assistantMsg.content = toolCalls.map(toolCall => new vscode.LanguageModelToolCallPart(toolCall.call.callId, toolCall.tool.name, toolCall.call.input));
 				this.state.addMessage(assistantMsg);
 
-				let hasJson = false;
-				let display: string | undefined;
+				let shownToUser = false;
 				for (const toolCall of toolCalls) {
 					let toolCallResult = (await toolCall.result);
 
-					const plainText = toolCallResult['text/plain'];
-					const markdown = toolCallResult['text/markdown'];
-					const json = toolCallResult['text/json'];
-					display = toolCallResult['text/display']; // our own fake type that we use to indicate something that should be streamed to the user
-					if (display) {
-						stream.markdown(display);
-					}
+					const additionalContent: vscode.LanguageModelTextPart[] = [];
+					let result: vscode.LanguageModelToolResultPart | undefined;
 
-					const content: (string | vscode.LanguageModelToolResultPart | vscode.LanguageModelToolCallPart)[] = [];
-					let isOnlyPlaintext = true;
-					if (json !== undefined) {
-						content.push(new vscode.LanguageModelToolResultPart(toolCall.call.toolCallId, JSON.stringify(json)));
-						isOnlyPlaintext = false;
-						hasJson = true;
+					for (let i = 0; i < toolCallResult.content.length; i++) {
+						const part = toolCallResult.content[i];
+						if (!(part instanceof vscode.LanguageModelTextPart)) {
+							// We only support text results for now, will change when we finish adopting prompt-tsx
+							result = new vscode.LanguageModelToolResultPart(toolCall.call.callId, toolCallResult.content);
+							continue;
+						}
 
-					} else if (markdown !== undefined) {
-						content.push(new vscode.LanguageModelToolResultPart(toolCall.call.toolCallId, markdown));
-						isOnlyPlaintext = false;
-					}
-					if (plainText !== undefined) {
-						if (isOnlyPlaintext) {
-							content.push(new vscode.LanguageModelToolResultPart(toolCall.call.toolCallId, plainText));
+						if (part.value === TOOL_MARKDOWN_RESULT) {
+							const markdown = new vscode.MarkdownString((toolCallResult.content[++i] as vscode.LanguageModelTextPart).value);
+							markdown.supportHtml = true;
+							stream.markdown(markdown);
+							shownToUser = true;
+						} else if (part.value === TOOL_COMMAND_RESULT) {
+							commands.push(JSON.parse((toolCallResult.content[++i] as vscode.LanguageModelTextPart).value) as vscode.Command);
 						} else {
-							content.push(plainText);
+							if (!result) {
+								result = new vscode.LanguageModelToolResultPart(toolCall.call.callId, [part]);
+							} else {
+								additionalContent.push(part);
+							}
 						}
 					}
 					const message = vscode.LanguageModelChatMessage.User('');
-					message.content2 = content;
+					message.content = [result!];
 					this.state.addMessage(message);
+					if (additionalContent.length) {
+						const additionalMessage = vscode.LanguageModelChatMessage.User('');
+						additionalMessage.content = additionalContent;
+						this.state.addMessage(additionalMessage);
+					}
 				}
 
-				this.state.addMessage(vscode.LanguageModelChatMessage.User(`Above is the result of calling the functions ${toolCalls.map(call => call.tool.name).join(', ')}.${hasJson ? ' The JSON is also included and should be passed to the next tool.' : ''} ${display ? 'The user can see the result of the tool call and doesn\'t need you to show it.' : 'The user cannot see the result of the tool call, so you should show it to them in an appropriate way.'}`));
+				this.state.addMessage(vscode.LanguageModelChatMessage.User(`Above is the result of calling the functions ${toolCalls.map(call => call.tool.name).join(', ')}. ${shownToUser ? 'The user can see the result of the tool call.' : ''}`));
 				return runWithFunctions();
 			}
 		};
 		await runWithFunctions();
+		this.addButtons(stream, commands);
 	}
 
+	private addButtons(stream: vscode.ChatResponseStream, commands: vscode.Command[]) {
+		for (const command of commands) {
+			stream.button(command);
+		}
+	}
 }
 

@@ -7,11 +7,12 @@
 import * as vscode from 'vscode';
 import Logger from '../../common/logger';
 import { FolderRepositoryManager } from '../../github/folderRepositoryManager';
-import { ILabel, Issue } from '../../github/interface';
-import { concatAsyncIterable, MimeTypes, RepoToolBase } from './toolsUtils';
+import { ILabel } from '../../github/interface';
+import { escapeMarkdown } from '../../issues/util';
+import { concatAsyncIterable, RepoToolBase } from './toolsUtils';
 
 interface ConvertToQuerySyntaxParameters {
-	naturalLanguageString: string;
+	naturalLanguageString?: string;
 	repo?: {
 		owner?: string;
 		name?: string;
@@ -78,6 +79,7 @@ const githubSearchSyntax = {
 const MATCH_UNQUOTED_SPACES = /(?!\B"[^"]*)\s+(?![^"]*"\B)/;
 
 export class ConvertToSearchSyntaxTool extends RepoToolBase<ConvertToQuerySyntaxParameters> {
+	public static readonly toolId = 'github-pull-request_formSearchQuery';
 	static ID = 'ConvertToSearchSyntaxTool';
 
 	private async fullQueryAssistantPrompt(folderRepoManager: FolderRepositoryManager): Promise<string> {
@@ -89,7 +91,7 @@ You are an expert on GitHub issue search syntax. GitHub issues are always softwa
 - "repo" is often formated as "owner/name". If needed, the current repo is ${remote.owner}/${remote.repositoryName}.
 - Ignore display information.
 - Respond with only the query.
-- Always include a "sort:" parameter.
+- Always include a "sort:" parameter. If multiple sorts are possible, choose the one that the user requested.
 - Always include a property with the @me value if the query includes "me" or "my".
 - Here are some examples of valid queries:
 	- repo:microsoft/vscode is:issue state:open sort:updated-asc
@@ -97,8 +99,11 @@ You are an expert on GitHub issue search syntax. GitHub issues are always softwa
 	- assignee:@me milestone:"October 2024" is:open is:issue sort:reactions
 	- comments:>5 org:contoso is:issue state:closed mentions:@me label:bug
 	- interactions:>5 repo:contoso/cli is:issue state:open
+	- repo:microsoft/vscode-python is:issue sort:updated -assignee:@me
+	- repo:contoso/cli is:issue sort:updated no:milestone
 - Go through each word of the natural language query and try to match it to a syntax component.
-- Use a "-" in front of a syntax component to indicate that it should be excluded from the search.
+- Use a "-" in front of a syntax component to indicate that it should be "not-ed".
+- Use the "no" syntax component to indicate that a property should be empty.
 - As a reminder, here are the components of the query syntax:
 	${JSON.stringify(githubSearchSyntax)}
 `;
@@ -112,13 +117,14 @@ You are an expert on GitHub issue search syntax. GitHub issues are always softwa
 		return `Instructions:
 You are an expert on choosing search keywords based on a natural language search query. Here are some rules to follow:
 - Choose labels based on what the user wants to search for, not based on the actual words in the query.
+- The user might include info on how they want their search results to be displayed. Ignore all of that.
 - Labels will be and-ed together, so don't pick a bunch of super specific labels.
 - Try to pick just one label.
 - Respond with a space-separated list of labels: Examples: 'bug polish', 'accessibility "feature accessibility"'
 - Only choose labels that you're sure are relevant. Having no labels is preferable than lables that aren't relevant.
 - Don't choose labels that the user has explicitly excluded.
-- Respond with labels chosen from these options:
-${labels.map(label => label.name).filter(label => !label.includes('required') && !label.includes('search') && !label.includes('question') && !label.includes('find')).join(', ')}
+- Respond with label names chosen from this JSON array of options:
+${JSON.stringify(labels.filter(label => !label.name.includes('required') && !label.name.includes('search') && !label.name.includes('question') && !label.name.includes('find')).map(label => ({ name: label.name, description: label.description })))}
 `;
 	}
 
@@ -128,15 +134,16 @@ You are getting ready to make a GitHub search query. Given a natural language qu
 - Only include a max of 1 key word that is relevant to the search query.
 - Don't refer to issue numbers.
 - Don't refer to product names.
-- Don't include any key words that might be related to sorting.
+- Don't include any key words that might be related to display or rendering.
 - Respond with only your chosen key word.
 - It's better to return no keywords than to return irrelevant keywords.
 - If an issue is provided, choose a keyword that names the feature or bug that the issue is about.
+- Don't include key words or concepts that are already covered by labels.
 `;
 	}
 
-	private freeFormUserPrompt(originalUserPrompt: string): string {
-		return `The best search keywords in "${originalUserPrompt}" are:`;
+	private freeFormUserPrompt(labels: string[], originalUserPrompt: string): string {
+		return `I've already included the following labels: [${labels.join(', ')}]. The best search keywords in "${originalUserPrompt}" are:`;
 	}
 
 	private labelsUserPrompt(originalUserPrompt: string): string {
@@ -214,23 +221,26 @@ You are getting ready to make a GitHub search query. Given a natural language qu
 	private validateFreeForm(baseQuery: string, labels: string[], freeForm: string) {
 		// Currently, we only allow the free form to return one keyword
 		freeForm = freeForm.trim();
+		// useless strings to search for
+		if (freeForm.includes('issue') || freeForm.match(MATCH_UNQUOTED_SPACES) || freeForm.toLowerCase() === 'none') {
+			return '';
+		}
 		if (baseQuery.includes(freeForm)) {
 			return '';
 		}
 		if (labels.includes(freeForm)) {
 			return '';
 		}
-		if (labels.some(label => freeForm.includes(label))) {
+		if (labels.some(label => freeForm.includes(label) || label.includes(freeForm))) {
 			return '';
 		}
-		// useless strings to search for
-		if (freeForm.includes('issue')) {
+		if (Object.keys(githubSearchSyntax).find(searchPart => freeForm.includes(searchPart) || searchPart.includes(freeForm))) {
 			return '';
 		}
 		return freeForm;
 	}
 
-	private validateQuery(query: string, labelsList: string, allLabels: ILabel[], freeForm: string) {
+	private validateQuery(query: string, labels: string[], freeForm: string) {
 		let reformedQuery = '';
 		const queryParts = query.split(MATCH_UNQUOTED_SPACES);
 		// Only keep property:value pairs and '-', no reform allowed here.
@@ -240,7 +250,8 @@ You are getting ready to make a GitHub search query. Given a natural language qu
 			}
 			const propAndVal = part.split(':');
 			if (propAndVal.length === 2) {
-				const label = propAndVal[0];
+				const hasMinus = propAndVal[0].startsWith('-');
+				const label = hasMinus ? propAndVal[0].substring(1) : propAndVal[0];
 				const value = propAndVal[1];
 				if (!label.match(/^[a-zA-Z]+$/)) {
 					continue;
@@ -248,25 +259,26 @@ You are getting ready to make a GitHub search query. Given a natural language qu
 				if (!this.validateSpecificQueryPart(label, value)) {
 					continue;
 				}
-			} else if (!part.startsWith('-')) {
-				continue;
+				if (label === 'no' && value === 'label' && labels.length > 0) {
+					// special case for no:label as we shouldn't have both no:label and label:label
+					continue;
+				}
 			}
 			reformedQuery = `${reformedQuery} ${part}`;
 		}
 
-		const validLabels = this.validateLabelsList(labelsList, allLabels);
-		const validFreeForm = this.validateFreeForm(reformedQuery, validLabels, freeForm);
+		const validFreeForm = this.validateFreeForm(reformedQuery, labels, freeForm);
 
-		reformedQuery = `${reformedQuery} ${validLabels.map(label => `label:${label}`).join(' ')} ${validFreeForm}`;
+		reformedQuery = `${reformedQuery} ${labels.map(label => `label:${label}`).join(' ')} ${validFreeForm}`;
 		return reformedQuery.trim();
 	}
 
-	private postProcess(queryPart: string, freeForm: string, labelsList: string, allLabels: ILabel[]): ConvertToQuerySyntaxResult | undefined {
+	private postProcess(queryPart: string, freeForm: string, labels: string[]): ConvertToQuerySyntaxResult | undefined {
 		const query = this.findQuery(queryPart);
 		if (!query) {
 			return;
 		}
-		const fixedLabels = this.validateQuery(query, labelsList, allLabels, freeForm);
+		const fixedLabels = this.validateQuery(query, labels, freeForm);
 		const fixedRepo = this.fixRepo(fixedLabels);
 		return fixedRepo;
 	}
@@ -330,9 +342,9 @@ You are getting ready to make a GitHub search query. Given a natural language qu
 		return concatAsyncIterable(response.text);
 	}
 
-	private async generateFreeFormQuery(folderManager: FolderRepositoryManager, chatOptions: vscode.LanguageModelChatRequestOptions, model: vscode.LanguageModelChat, naturalLanguageString: string, token: vscode.CancellationToken): Promise<string> {
+	private async generateFreeFormQuery(folderManager: FolderRepositoryManager, chatOptions: vscode.LanguageModelChatRequestOptions, model: vscode.LanguageModelChat, naturalLanguageString: string, labels: string[], token: vscode.CancellationToken): Promise<string> {
 		const messages = [vscode.LanguageModelChatMessage.Assistant(this.freeFormAssistantPrompt())];
-		messages.push(vscode.LanguageModelChatMessage.User(this.freeFormUserPrompt(naturalLanguageString)));
+		messages.push(vscode.LanguageModelChatMessage.User(this.freeFormUserPrompt(labels, naturalLanguageString)));
 		const response = await model.sendRequest(messages, chatOptions, token);
 		return concatAsyncIterable(response.text);
 	}
@@ -344,21 +356,17 @@ You are getting ready to make a GitHub search query. Given a natural language qu
 		return concatAsyncIterable(response.text);
 	}
 
-	private toGitHubUrl(query: string) {
-		return `https://github.com/issues/?q=${encodeURIComponent(query)}`;
-	}
-
-	async prepareToolInvocation(_options: vscode.LanguageModelToolInvocationPrepareOptions<ConvertToQuerySyntaxParameters>): Promise<vscode.PreparedToolInvocation> {
+	async prepareInvocation(_options: vscode.LanguageModelToolInvocationPrepareOptions<ConvertToQuerySyntaxParameters>): Promise<vscode.PreparedToolInvocation> {
 		return {
 			invocationMessage: vscode.l10n.t('Converting to search syntax')
 		};
 	}
 
 	async invoke(options: vscode.LanguageModelToolInvocationOptions<ConvertToQuerySyntaxParameters>, token: vscode.CancellationToken): Promise<vscode.LanguageModelToolResult | undefined> {
-		const { owner, name, folderManager } = this.getRepoInfo(options);
-		const firstUserMessage = `${this.chatParticipantState.firstUserMessage}, ${options.parameters.naturalLanguageString}`;
+		const { owner, name, folderManager } = await this.getRepoInfo({ owner: options.input.repo?.owner, name: options.input.repo?.name });
+		const firstUserMessage = `${this.chatParticipantState.firstUserMessage?.value}, ${options.input.naturalLanguageString}`;
 
-		const labels = await folderManager.getLabels(undefined, { owner, repo: name });
+		const allLabels = await folderManager.getLabels(undefined, { owner, repo: name });
 
 		const models = await vscode.lm.selectChatModels({
 			vendor: 'copilot',
@@ -368,52 +376,112 @@ You are getting ready to make a GitHub search query. Given a natural language qu
 		const chatOptions: vscode.LanguageModelChatRequestOptions = {
 			justification: 'Answering user questions pertaining to GitHub.'
 		};
-		const [query, freeForm, labelsList] = await Promise.all([this.generateQuery(folderManager, chatOptions, model, firstUserMessage, token), this.generateFreeFormQuery(folderManager, chatOptions, model, firstUserMessage, token), this.generateLabelQuery(folderManager, labels, chatOptions, model, firstUserMessage, token)]);
-
-		const result = this.postProcess(query, freeForm, labelsList, labels);
+		const [query, labelsList] = await Promise.all([this.generateQuery(folderManager, chatOptions, model, firstUserMessage, token), this.generateLabelQuery(folderManager, allLabels, chatOptions, model, firstUserMessage, token)]);
+		const validatedLabels = this.validateLabelsList(labelsList, allLabels);
+		const freeForm = await this.generateFreeFormQuery(folderManager, chatOptions, model, firstUserMessage, validatedLabels, token);
+		const result = this.postProcess(query, freeForm, validatedLabels);
 		if (!result) {
 			throw new Error('Unable to form a query.');
 		}
 		Logger.debug(`Query \`${result.query}\``, ConvertToSearchSyntaxTool.ID);
-		return {
-			[MimeTypes.textPlain]: result.query,
-			[MimeTypes.textDisplay]: vscode.l10n.t('Query \`{0}\`. [Open on GitHub.com]({1})\n\n', result.query, this.toGitHubUrl(result.query))
+		const json: ConvertToQuerySyntaxResult = {
+			query: result.query,
+			repo: {
+				owner,
+				name
+			}
 		};
+		return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify(json)),
+		new vscode.LanguageModelTextPart('Above is the query in stringified json format. You can pass this VERBATIM to a tool that knows how to search.')]);
 	}
 }
 
 type SearchToolParameters = ConvertToQuerySyntaxResult;
 
+export interface IssueSearchResultAccount {
+	login?: string;
+	url?: string;
+}
+
+interface IssueSearchResultLabel {
+	name?: string;
+	color?: string;
+}
+
+export interface IssueSearchResultItem {
+	title?: string;
+	url?: string;
+	number?: number;
+	labels?: IssueSearchResultLabel[];
+	state?: string;
+	assignees?: IssueSearchResultAccount[] | undefined;
+	createdAt?: string;
+	updatedAt?: string;
+	author?: IssueSearchResultAccount;
+	milestone?: string | undefined;
+	commentCount?: number;
+	reactionCount?: number;
+}
+
 export interface SearchToolResult {
-	arrayOfIssues: Issue[];
+	arrayOfIssues?: IssueSearchResultItem[];
+	totalIssues?: number;
 }
 
 export class SearchTool extends RepoToolBase<SearchToolParameters> {
+	public static readonly toolId = 'github-pull-request_doSearch';
 	static ID = 'SearchTool';
 
-	async prepareToolInvocation(_options: vscode.LanguageModelToolInvocationPrepareOptions<SearchToolParameters>): Promise<vscode.PreparedToolInvocation> {
+
+	private toGitHubUrl(query: string) {
+		return `https://github.com/issues/?q=${encodeURIComponent(query)}`;
+	}
+
+	async prepareInvocation(options: vscode.LanguageModelToolInvocationPrepareOptions<SearchToolParameters>): Promise<vscode.PreparedToolInvocation> {
+		const parameterQuery = options.input.query;
+		const message = new vscode.MarkdownString();
+		message.appendText(vscode.l10n.t('Searching for issues with "{0}".', parameterQuery));
+		message.appendMarkdown(vscode.l10n.t(' [Open on GitHub.com]({0})', escapeMarkdown(this.toGitHubUrl(parameterQuery))));
+
 		return {
-			invocationMessage: vscode.l10n.t('Searching for issues')
+			invocationMessage: message
 		};
 	}
 
 	async invoke(options: vscode.LanguageModelToolInvocationOptions<SearchToolParameters>, _token: vscode.CancellationToken): Promise<vscode.LanguageModelToolResult | undefined> {
-		const { folderManager } = this.getRepoInfo(options);
+		const { folderManager } = await this.getRepoInfo({ owner: options.input.repo?.owner, name: options.input.repo?.name });
 
-		const parameterQuery = options.parameters.query;
+		const parameterQuery = options.input.query;
 		Logger.debug(`Searching with query \`${parameterQuery}\``, SearchTool.ID);
 
 		const searchResult = await folderManager.getIssues(parameterQuery);
 		if (!searchResult) {
 			throw new Error(`No issues found for ${parameterQuery}. Make sure the query is valid.`);
 		}
+		const cutoff = 30;
 		const result: SearchToolResult = {
-			arrayOfIssues: searchResult.items.map(i => i.item)
+			arrayOfIssues: searchResult.items.slice(0, cutoff).map(i => {
+				const item = i.item;
+				return {
+					title: item.title,
+					url: item.url,
+					number: item.number,
+					labels: item.labels.map(l => ({ name: l.name, color: l.color })),
+					state: item.state,
+					assignees: item.assignees?.map(a => ({ login: a.login, url: a.url })),
+					createdAt: item.createdAt,
+					updatedAt: item.updatedAt,
+					author: { login: item.user.login, url: item.user.url },
+					milestone: item.milestone?.title,
+					commentCount: item.commentCount,
+					reactionCount: item.reactionCount
+				};
+			}),
+			totalIssues: searchResult.totalCount ?? searchResult.items.length
 		};
-		Logger.debug(`Found ${result.arrayOfIssues.length} issues, first issue ${result.arrayOfIssues[0]?.number}.`, SearchTool.ID);
-		return {
-			[MimeTypes.textPlain]: `Here are the issues I found for the query ${parameterQuery} in json format. You can pass these to a tool that can display them.`,
-			[MimeTypes.textJson]: result
-		};
+		Logger.debug(`Found ${result.totalIssues} issues, first issue ${result.arrayOfIssues![0]?.number}.`, SearchTool.ID);
+
+		return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify(result)),
+		new vscode.LanguageModelTextPart(`Above are the issues I found for the query ${parameterQuery} in json format. You can pass these to a tool that can display them, or you can reason over the issues to answer a question.`)]);
 	}
 }

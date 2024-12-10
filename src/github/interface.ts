@@ -61,13 +61,14 @@ export interface IAccount extends IActor {
 	avatarUrl?: string;
 	url: string;
 	email?: string;
+	specialDisplayName?: string
 }
 
 export interface ITeam {
 	name?: string;
 	avatarUrl?: string;
 	url: string;
-	slug: string;
+	slug?: string;
 	org: string;
 	id: string;
 }
@@ -82,11 +83,11 @@ export function reviewerId(reviewer: ITeam | IAccount): string {
 	return isTeam(reviewer) ? reviewer.id : reviewer.login;
 }
 
-export function reviewerLabel(reviewer: ITeam | IAccount | IActor): string {
-	return isTeam(reviewer) ? (reviewer.name ?? reviewer.slug) : reviewer.login;
+export function reviewerLabel(reviewer: ITeam | IAccount | IActor | any): string {
+	return isTeam(reviewer) ? (reviewer.name ?? reviewer.slug ?? reviewer.id) : (reviewer.specialDisplayName ?? reviewer.login);
 }
 
-export function isTeam(reviewer: ITeam | IAccount | IActor): reviewer is ITeam {
+export function isTeam(reviewer: ITeam | IAccount | IActor | any): reviewer is ITeam {
 	return 'org' in reviewer;
 }
 
@@ -151,6 +152,7 @@ export interface IIssueComment {
 	body: string;
 	databaseId: number;
 	reactionCount: number;
+	createdAt: string;
 }
 
 export interface Issue {
