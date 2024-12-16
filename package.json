@@ -32,7 +32,7 @@
 		"tokenInformation",
 		"treeViewMarkdownMessage"
 	],
-	"version": "0.100.1",
+	"version": "0.102.0",
 	"publisher": "GitHub",
 	"engines": {
 		"vscode": "^1.96.0"
@@ -547,9 +547,7 @@
 						"type": "string",
 						"description": "%githubIssues.ignoreUserCompletionTrigger.items%"
 					},
-					"default": [
-						"python"
-					],
+					"default": [],
 					"description": "%githubIssues.ignoreUserCompletionTrigger.description%"
 				},
 				"githubIssues.issueBranchTitle": {
@@ -2437,7 +2435,7 @@
 				{
 					"command": "review.openFile",
 					"group": "inline@0",
-					"when": "openDiffOnClick && view == prStatus:github && viewItem =~ /filechange(?!:DELETE)/"
+					"when": "openDiffOnClick && view == prStatus:github && viewItem =~ /filechange(?!:DELETE)/ && config.git.showInlineOpenFileAction"
 				},
 				{
 					"command": "pr.openDiffView",
